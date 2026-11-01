@@ -1,0 +1,32 @@
+services:
+  autovault:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: autovault:local
+    container_name: autovault
+    restart: unless-stopped
+    environment:
+      AUTOVAULT_HOME: /data
+      AUTOVAULT_CONTAINER: "1"
+    ports:
+      - "127.0.0.1:${AUTOVAULT_PORT:-8766}:8765"
+    volumes:
+      - autovault_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=2)"]
+      interval: 20s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  autovault_data:
