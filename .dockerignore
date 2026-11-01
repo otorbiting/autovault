@@ -1,0 +1,15 @@
+.git
+.gitignore
+__pycache__
+*.py[cod]
+.DS_Store
+outputs
+portable-data
+*.sqlite3
+*.db
+*.tar.gz
+.env
+.env.*
+work
+tests
+README.md
