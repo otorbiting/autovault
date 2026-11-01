@@ -1,8 +1,8 @@
-import os
 import sys
 import io
 import unittest
 import zipfile
+from unittest.mock import patch
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -13,65 +13,22 @@ import tarfile
 from fastapi import HTTPException
 
 
-class HostedAuthTests(unittest.TestCase):
+class HostedAccessTests(unittest.TestCase):
     def setUp(self):
-        os.environ["AUTOVAULT_ACCESS_PASSWORD"] = "a-private-password-123"
-        os.environ["AUTOVAULT_SESSION_SECRET"] = "s" * 40
         self.client = TestClient(app, base_url="https://testserver")
 
-    def tearDown(self):
-        os.environ.pop("AUTOVAULT_ACCESS_PASSWORD", None)
-        os.environ.pop("AUTOVAULT_SESSION_SECRET", None)
-
-    def test_all_hosted_pages_and_data_routes_require_auth(self):
-        page = self.client.get("/", follow_redirects=False)
-        self.assertEqual(page.status_code, 303)
-        self.assertEqual(page.headers["location"], "/login")
-        self.assertEqual(self.client.get("/static/app.js", follow_redirects=False).status_code, 303)
-        self.assertEqual(self.client.get("/api/health").status_code, 401)
-        self.assertEqual(
-            self.client.post(
-                "/api/workflows/private/run",
-                json={"approved": True, "path": "main.py"},
-            ).status_code,
-            401,
-        )
-
-    def test_login_sets_secure_session_cookie_and_hosted_execution_stays_disabled(self):
-        denied = self.client.post("/api/auth/login", data={"password": "wrong"})
-        self.assertEqual(denied.status_code, 401)
-
-        response = self.client.post(
-            "/api/auth/login",
-            data={"password": "a-private-password-123"},
-            follow_redirects=False,
-        )
-        self.assertEqual(response.status_code, 303)
-        cookie = response.headers["set-cookie"].lower()
-        self.assertIn("httponly", cookie)
-        self.assertIn("secure", cookie)
-        self.assertIn("samesite=strict", cookie)
-
+    def test_hosted_pages_and_data_routes_are_public_without_login(self):
         home = self.client.get("/")
         self.assertEqual(home.status_code, 200)
         self.assertIn('data-hosted="true"', home.text)
-        run = self.client.post(
-            "/api/workflows/private/run",
-            json={"approved": True, "path": "main.py"},
-        )
+        self.assertEqual(self.client.get("/static/app.js").status_code, 200)
+        with patch("autovault.hosted.ensure_schema"):
+            self.assertEqual(self.client.get("/api/health").status_code, 200)
+
+        run = self.client.post("/api/workflows/private/run", json={"approved": True, "path": "main.py"})
         self.assertEqual(run.status_code, 403)
         self.assertEqual(run.json()["error"], "Script execution is disabled in the hosted deployment.")
-
-        logout = self.client.post("/api/auth/logout", json={})
-        self.assertEqual(logout.status_code, 204)
-        self.assertEqual(self.client.get("/api/health").status_code, 401)
-
-    def test_auth_configuration_fails_closed(self):
-        os.environ.pop("AUTOVAULT_ACCESS_PASSWORD", None)
-        os.environ.pop("AUTOVAULT_SESSION_SECRET", None)
-        response = self.client.post("/api/auth/login", data={"password": "anything"})
-        self.assertEqual(response.status_code, 503)
-        self.assertIn("AUTOVAULT_ACCESS_PASSWORD", response.json()["error"])
+        self.assertEqual(self.client.get("/login").status_code, 404)
 
     def test_oversized_request_is_rejected(self):
         response = self.client.post(

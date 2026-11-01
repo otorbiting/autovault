@@ -56,25 +56,15 @@ The tests use temporary data directories and do not modify your real library.
 
 ## Vercel hosted deployment
 
-The Vercel deployment uses Python 3.12 and FastAPI Functions. The local Docker and direct-run modes continue to use the standard-library HTTP server, SQLite, the filesystem, and Git. The hosted mode stores catalog, notes, run history, and version manifests in Neon Postgres; workflow file contents and portable backup exports live in a **private** Vercel Blob store.
+The Vercel deployment uses Python 3.12 and FastAPI Functions. The local Docker and direct-run modes continue to use the standard-library HTTP server, SQLite, the filesystem, and Git. The hosted mode stores catalog, notes, run history, and version manifests in Neon Postgres; workflow file contents and portable backup exports live in a **private** Vercel Blob store. The hosted application itself is public: anyone who can reach its URL can view, create, edit, export, or delete its data.
 
 1. Import `otorbiting/autovault` as a Vercel project.
 2. Connect a Neon Postgres database through the Vercel Marketplace and make its `DATABASE_URL` available to the project.
 3. Create and connect a **private** Vercel Blob store. The hosted runtime uses Vercel OIDC credentials supplied to the connected project.
-4. Add these Vercel environment variables for Production and Preview:
-   - `AUTOVAULT_ACCESS_PASSWORD`: shared login password, at least 16 characters.
-   - `AUTOVAULT_SESSION_SECRET`: random signing secret, at least 32 characters. Keep it stable to preserve active sessions across deployments.
-   - `DATABASE_URL`: Neon Postgres connection string (usually supplied by the Neon integration).
-5. Deploy from Vercel. The app creates its Postgres schema on first authenticated data request.
+4. Make `DATABASE_URL` available to the project (usually supplied by the Neon integration). No app password or session secret is required.
+5. Deploy from Vercel. The app creates its Postgres schema on its first data request.
 
-For example, generate independent values locally and add them directly in Vercel project settings:
-
-```sh
-openssl rand -base64 32
-openssl rand -hex 32
-```
-
-The app uses an eight-hour, `Secure`, `HttpOnly`, `SameSite=Strict` session cookie. The login form is the only unauthenticated page; other pages, static assets, API routes, and file/backup reads require a valid session. Hosted script execution always returns `403`, even if a caller sends an approval flag. Imported run history remains viewable. Hosted JSON requests are capped at 3.5 MB; text file imports are capped at 1 MB and ZIP imports at 2.5 MB compressed.
+The hosted app has no login: all pages, APIs, workflow files, and backup exports are available to anyone who can reach the deployment URL. Do not put sensitive workflows or data in this deployment. Hosted script execution always returns `403`, even if a caller sends an approval flag. Imported run history remains viewable. Hosted JSON requests are capped at 3.5 MB; text file imports are capped at 1 MB and ZIP imports at 2.5 MB compressed.
 
 ### One-time portable data import
 

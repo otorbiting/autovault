@@ -5,7 +5,6 @@ import base64
 import datetime as dt
 import difflib
 import hashlib
-import hmac
 import io
 import json
 import mimetypes
@@ -20,18 +19,16 @@ import urllib.parse
 import uuid
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from psycopg.rows import dict_row
 
 from .app import SAFE_ID, TYPES, new_id, now
 
 STATIC = Path(__file__).parent / "static"
-SESSION_COOKIE = "autovault_session"
-SESSION_SECONDS = 8 * 60 * 60
 MAX_REQUEST_BYTES = 3_500_000
 SAFE_STATUS = {"Active", "Testing", "Maintenance", "Archived"}
 _schema_ready = False
@@ -40,51 +37,11 @@ _schema_lock = threading.Lock()
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
 
-def _auth_settings() -> Tuple[str, bytes]:
-    password = os.environ.get("AUTOVAULT_ACCESS_PASSWORD", "")
-    secret = os.environ.get("AUTOVAULT_SESSION_SECRET", "")
-    if len(password) < 16 or len(secret) < 32:
-        raise RuntimeError(
-            "Set AUTOVAULT_ACCESS_PASSWORD (at least 16 characters) and "
-            "AUTOVAULT_SESSION_SECRET (at least 32 characters)."
-        )
-    return password, secret.encode("utf-8")
-
-
-def _valid_session(token: Optional[str]) -> bool:
-    if not token:
-        return False
-    try:
-        password, secret = _auth_settings()
-        expires_text, signature = token.split(".", 1)
-        expires = int(expires_text)
-    except (RuntimeError, ValueError):
-        return False
-    if expires < int(dt.datetime.now(dt.timezone.utc).timestamp()):
-        return False
-    signing_key = hashlib.sha256(secret + b"\0" + password.encode("utf-8")).digest()
-    expected = hmac.new(signing_key, expires_text.encode("ascii"), hashlib.sha256).hexdigest()
-    return hmac.compare_digest(signature, expected)
-
-
-def _session_token() -> str:
-    password, secret = _auth_settings()
-    expires_text = str(int(dt.datetime.now(dt.timezone.utc).timestamp()) + SESSION_SECONDS)
-    signing_key = hashlib.sha256(secret + b"\0" + password.encode("utf-8")).digest()
-    signature = hmac.new(signing_key, expires_text.encode("ascii"), hashlib.sha256).hexdigest()
-    return expires_text + "." + signature
-
-
 @app.middleware("http")
-async def require_hosted_auth(request: Request, call_next):
+async def hosted_request_controls(request: Request, call_next):
     content_length = request.headers.get("content-length")
     if content_length and content_length.isdigit() and int(content_length) > MAX_REQUEST_BYTES:
         return JSONResponse({"error": "Request exceeds the hosted 3.5 MB limit"}, status_code=413)
-    public_paths = {"/login", "/api/auth/login"}
-    if request.url.path not in public_paths and not _valid_session(request.cookies.get(SESSION_COOKIE)):
-        if request.url.path.startswith("/api/"):
-            return JSONResponse({"error": "Authentication required"}, status_code=401)
-        return RedirectResponse("/login", status_code=303)
 
     origin = request.headers.get("origin")
     if origin and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
@@ -92,12 +49,7 @@ async def require_hosted_auth(request: Request, call_next):
         if parsed.netloc.lower() != request.headers.get("host", "").lower():
             return JSONResponse({"error": "Cross-origin request rejected"}, status_code=403)
 
-    try:
-        response = await call_next(request)
-    except RuntimeError as exc:
-        if "AUTOVAULT_ACCESS_PASSWORD" in str(exc) or "AUTOVAULT_SESSION_SECRET" in str(exc):
-            return JSONResponse({"error": str(exc)}, status_code=503)
-        raise
+    response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "same-origin")
     response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
@@ -458,61 +410,6 @@ async def _manifest_files(wid: str, manifest: Dict[str, str]) -> Dict[str, str]:
         data = await blob_api().get_blob(pathname, access="private")
         result[path] = data.body.decode("utf-8", errors="replace")
     return result
-
-
-@app.get("/login", response_class=HTMLResponse)
-async def login_page():
-    return HTMLResponse(
-        """<!doctype html><html lang="en"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sign in — AutoVault</title><body style="font:16px system-ui;max-width:28rem;margin:10vh auto;padding:2rem">
-<h1>AutoVault</h1><p>Sign in to your private workflow library.</p>
-<form action="/api/auth/login" method="post"><label for="password">App password</label>
-<input id="password" name="password" type="password" required autocomplete="current-password"
-style="display:block;width:100%;box-sizing:border-box;padding:.8rem;margin:.5rem 0 1rem">
-<button style="padding:.7rem 1rem">Sign in</button></form></body></html>"""
-    )
-
-
-@app.post("/api/auth/login")
-async def login(request: Request):
-    try:
-        configured_password, _ = _auth_settings()
-    except RuntimeError as exc:
-        raise HTTPException(503, str(exc)) from None
-    body = await request.body()
-    if len(body) > MAX_REQUEST_BYTES:
-        raise HTTPException(413, "Request exceeds the hosted 3.5 MB limit")
-    content_type = request.headers.get("content-type", "")
-    if "application/json" in content_type:
-        try:
-            values = json.loads(body or b"{}")
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            raise HTTPException(400, "Invalid login request") from None
-    else:
-        values = urllib.parse.parse_qs(body.decode("utf-8", errors="replace"))
-        values = {key: items[-1] for key, items in values.items()}
-    password = values.get("password", "") if isinstance(values, dict) else ""
-    if not isinstance(password, str) or not hmac.compare_digest(password, configured_password):
-        raise HTTPException(401, "Incorrect password")
-    response = RedirectResponse("/", status_code=303)
-    response.set_cookie(
-        SESSION_COOKIE,
-        _session_token(),
-        max_age=SESSION_SECONDS,
-        httponly=True,
-        secure=True,
-        samesite="strict",
-        path="/",
-    )
-    return response
-
-
-@app.post("/api/auth/logout")
-async def logout():
-    response = Response(status_code=204)
-    response.delete_cookie(SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="strict")
-    return response
 
 
 @app.get("/")
